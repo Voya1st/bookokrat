@@ -69,7 +69,7 @@ jobs:
         run: cargo build --release --locked --no-default-features --target $env:TARGET
 
       - name: Smoke test
-        run: ./target/$env:TARGET/release/bookokrat.exe --version
+        run: & "./target/$env:TARGET/release/bookokrat.exe" --version
 
       - name: Package
         id: package
