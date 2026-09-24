@@ -476,9 +476,20 @@ fn apply_protocol_overrides(caps: &mut TerminalCapabilities, picker: Option<&mut
     caps.protocol = protocol;
 }
 
+/// BOOKOKRAT_PROTOCOL, or Sixel by default on Windows: every Windows terminal talks to
+/// console apps through ConPTY, which keeps only Sixel images in its screen buffer.
+/// Kitty/iTerm2 images are passed through but then painted over by ConPTY's own redraw.
+fn protocol_override_value() -> Option<String> {
+    match env::var("BOOKOKRAT_PROTOCOL") {
+        Ok(value) => Some(value.to_ascii_lowercase()),
+        Err(_) if cfg!(windows) => Some("sixel".to_string()),
+        Err(_) => None,
+    }
+}
+
 fn protocol_override_graphics_from_env() -> Option<GraphicsProtocol> {
-    let value = env::var("BOOKOKRAT_PROTOCOL").ok()?;
-    match value.to_ascii_lowercase().as_str() {
+    let value = protocol_override_value()?;
+    match value.as_str() {
         "halfblocks" | "half" | "blocks" => Some(GraphicsProtocol::Halfblocks),
         "sixel" => Some(GraphicsProtocol::Sixel),
         "kitty" => Some(GraphicsProtocol::Kitty),
@@ -674,8 +685,8 @@ pub fn is_warp_terminal() -> bool {
 }
 
 pub fn protocol_override_from_env() -> Option<ProtocolType> {
-    let value = env::var("BOOKOKRAT_PROTOCOL").ok()?;
-    match value.to_ascii_lowercase().as_str() {
+    let value = protocol_override_value()?;
+    match value.as_str() {
         "halfblocks" | "half" | "blocks" => Some(ProtocolType::Halfblocks),
         "sixel" => Some(ProtocolType::Sixel),
         "kitty" => Some(ProtocolType::Kitty),

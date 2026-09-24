@@ -219,6 +219,7 @@ impl TerminalInput {
 
     #[cfg(not(unix))]
     fn read_stdin_nonblocking(buf: &mut [u8]) -> io::Result<usize> {
+        use std::io::Read;
         std::io::stdin().read(buf)
     }
 
