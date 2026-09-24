@@ -1,0 +1,93 @@
+# Buduje bookokrat pod Windows (bez PDF/DJVU) dla kazdego nowego wydania bugzmanov/bookokrat
+# i publikuje je jako wydanie w tym repozytorium. Zrodla sa pobierane prosto z oryginalnego repo,
+# wiec fork nie musi byc synchronizowany.
+name: Windows build
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag wydania z bugzmanov/bookokrat (puste = najnowsze)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build
+
+env:
+  UPSTREAM: bugzmanov/bookokrat
+  TARGET: x86_64-pc-windows-msvc
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Wydanie $tag juz istnieje - nic do zrobienia."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Buduje $tag."
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ env.TAG }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+
+      # PDF/DJVU (mupdf-sys) nie buduje sie natywnie na Windows - autor zaleca --no-default-features.
+      - name: Build
+        run: cargo build --release --locked --no-default-features --target $env:TARGET
+
+      - name: Smoke test
+        run: ./target/$env:TARGET/release/bookokrat.exe --version
+
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $name = "bookokrat-$env:TAG-$env:TARGET.zip"
+          Compress-Archive -Path "target/$env:TARGET/release/bookokrat.exe" -DestinationPath $name
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Set-Content -NoNewline -Encoding ascii "$name.sha256"
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "sha=$(git rev-parse HEAD)" >> $env:GITHUB_OUTPUT
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.package.outputs.name }}
+          SHA: ${{ steps.package.outputs.sha }}
+        run: |
+          $notes = "Nieoficjalna kompilacja bookokrat $env:TAG dla Windows (x86_64, MSVC), bez obslugi PDF/DJVU (--no-default-features).`n`nZrodla: https://github.com/$env:UPSTREAM/tree/$env:SHA"
+          gh release create $env:TAG $env:NAME "$env:NAME.sha256" --repo $env:GITHUB_REPOSITORY --title "bookokrat $env:TAG (Windows)" --notes $notes
