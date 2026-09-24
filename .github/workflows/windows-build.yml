@@ -1,6 +1,10 @@
-# Buduje bookokrat pod Windows (bez PDF/DJVU) dla kazdego nowego wydania bugzmanov/bookokrat
-# i publikuje je jako wydanie w tym repozytorium. Zrodla sa pobierane prosto z oryginalnego repo,
-# wiec fork nie musi byc synchronizowany.
+# Buduje bookokrat pod Windows dla kazdego nowego wydania bugzmanov/bookokrat i publikuje je
+# jako wydanie w tym repozytorium. Zrodla sa pobierane prosto z oryginalnego repo, wiec fork
+# nie musi byc synchronizowany.
+#
+# Na tag wydania nakladany jest commit z galezi windows-patches (kod PDF tylko dla Uniksa
+# odciety na Windows, domyslny protokol Sixel). Gdy sie uda - budowa z PDF/DJVU; gdy commit
+# nie pasuje do nowej wersji - budowa bez PDF z niezmienionego tagu.
 name: Windows build
 
 on:
@@ -22,6 +26,7 @@ concurrency:
 env:
   UPSTREAM: bugzmanov/bookokrat
   TARGET: x86_64-pc-windows-msvc
+  PATCH_BRANCH: windows-patches
 
 jobs:
   check:
@@ -51,22 +56,45 @@ jobs:
   build:
     needs: check
     if: needs.check.outputs.build == 'true'
-    runs-on: windows-latest
+    # mupdf-sys 0.6.0 rozpoznaje Visual Studio 2022 (toolset v143), ale nie 2026.
+    runs-on: windows-2022
     env:
       TAG: ${{ needs.check.outputs.tag }}
+      MUPDF_MSVC_PLATFORM_TOOLSET: v143
     steps:
       - uses: actions/checkout@v4
         with:
           repository: ${{ env.UPSTREAM }}
           ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Apply Windows patches
+        id: patch
+        shell: pwsh
+        run: |
+          git fetch "https://github.com/$env:GITHUB_REPOSITORY" $env:PATCH_BRANCH
+          git -c user.name=ci -c user.email=ci@localhost cherry-pick --no-commit FETCH_HEAD
+          if ($LASTEXITCODE -eq 0) {
+            "pdf=true" >> $env:GITHUB_OUTPUT
+            "patch=$(git rev-parse FETCH_HEAD)" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "::warning::Poprawki z $env:PATCH_BRANCH nie pasuja do $env:TAG - buduje bez PDF."
+            git cherry-pick --abort
+            git reset --hard
+            "pdf=false" >> $env:GITHUB_OUTPUT
+          }
+          exit 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}
 
-      # PDF/DJVU (mupdf-sys) nie buduje sie natywnie na Windows - autor zaleca --no-default-features.
       - name: Build
-        run: cargo build --release --locked --no-default-features --target $env:TARGET
+        shell: pwsh
+        run: |
+          $features = if ('${{ steps.patch.outputs.pdf }}' -eq 'true') { @() } else { @('--no-default-features') }
+          cargo build --release --locked --target $env:TARGET @features
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Smoke test
         run: '& "./target/$env:TARGET/release/bookokrat.exe" --version'
@@ -88,6 +116,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NAME: ${{ steps.package.outputs.name }}
           SHA: ${{ steps.package.outputs.sha }}
+          PDF: ${{ steps.patch.outputs.pdf }}
+          PATCH: ${{ steps.patch.outputs.patch }}
         run: |
-          $notes = "Nieoficjalna kompilacja bookokrat $env:TAG dla Windows (x86_64, MSVC), bez obslugi PDF/DJVU (--no-default-features).`n`nZrodla: https://github.com/$env:UPSTREAM/tree/$env:SHA"
+          if ($env:PDF -eq 'true') {
+            $variant = "z obsluga PDF/DJVU i domyslnym protokolem grafiki Sixel (obrazki i strony PDF wyswietlaja sie w Windows Terminal 1.22+)"
+            $patchInfo = "`nPoprawki dla Windows: https://github.com/$env:GITHUB_REPOSITORY/commit/$env:PATCH"
+          } else {
+            $variant = "BEZ obslugi PDF/DJVU (--no-default-features) - poprawki dla Windows nie pasowaly do tej wersji"
+            $patchInfo = ''
+          }
+          $notes = "Nieoficjalna kompilacja bookokrat $env:TAG dla Windows (x86_64, MSVC), $variant.`n`nZrodla: https://github.com/$env:UPSTREAM/tree/$env:SHA$patchInfo"
           gh release create $env:TAG $env:NAME "$env:NAME.sha256" --repo $env:GITHUB_REPOSITORY --title "bookokrat $env:TAG (Windows)" --notes $notes
